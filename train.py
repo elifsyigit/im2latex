@@ -38,8 +38,8 @@ def train():
     print("Initializing model...")
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(exist_ok=True)
-    last_checkpoint_path = checkpoint_dir / "im2latex_model.pt"
-    best_checkpoint_path = checkpoint_dir / "im2latex_model_best.pt"
+    last_checkpoint_path = checkpoint_dir / "im2latex_colab.pt"
+    best_checkpoint_path = checkpoint_dir / "im2latex_colab_best.pt"
 
     model = Im2LatexModel(vocab_size=vocab_size).to(DEVICE)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_ID)
@@ -47,26 +47,11 @@ def train():
 
     best_val_loss = float("inf")
     start_epoch = 0
-
-    if last_checkpoint_path.exists():
-        checkpoint = torch.load(last_checkpoint_path, map_location=DEVICE)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if "optimizer_state_dict" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-        loaded_epoch = checkpoint.get("epoch", -1)
-        start_epoch = loaded_epoch + 1
-        print(
-            f"Loaded checkpoint from {last_checkpoint_path}, "
-            f"resuming from epoch {start_epoch} (best_val_loss={best_val_loss:.4f})."
-        )
-    else:
-        raise FileNotFoundError(
-            f"Checkpoint not found at {last_checkpoint_path}. Training from scratch is disabled."
-        )
+    
+    print("Starting training from scratch...")
     
     model.train()
-    num_epochs = 10
+    num_epochs = 20
     print_interval = 100
     
     print(f"\nStarting training for {num_epochs} epochs...")
