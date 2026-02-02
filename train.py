@@ -3,11 +3,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 import sys
+import time
 
 sys.path.append(str(Path(__file__).parent))
-from config import BATCH_SIZE, LEARNING_RATE, DEVICE, PAD_ID
+from config import BATCH_SIZE, LEARNING_RATE, DEVICE, PAD_ID, SOS_ID, EOS_ID
 from data.dataset import Im2LatexDataset
 from models.transformer import Im2LatexModel
+from evaluation.metrics import compute_token_accuracy, compute_exact_match
 
 
 def train():
@@ -59,12 +61,19 @@ def train():
     print(f"Print loss every {print_interval} steps\n")
     
     for epoch in range(start_epoch, start_epoch + num_epochs):
+        epoch_start_time = time.time()
+        
+        # Reset GPU peak memory stats at start of epoch to measure training-only usage
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(DEVICE)
+        
         running_loss = 0.0           # windowed loss for logging
         window_steps = 0             # steps in current logging window
         epoch_loss_sum = 0.0         # sum of loss over entire epoch
         epoch_steps = 0              # number of steps in epoch
         epoch_correct_tokens = 0     # correct non-PAD tokens in epoch
         epoch_total_tokens = 0       # total non-PAD tokens in epoch
+        epoch_grad_norms = []        # gradient norms for each step
         
         # ---------- Training loop ----------
         for step, batch in enumerate(train_loader):
@@ -76,12 +85,25 @@ def train():
             
             logits = model(images, input_tokens)
             
-            logits = logits.view(-1, vocab_size)
+            logits_flat = logits.view(-1, vocab_size)
             targets = target_tokens.view(-1)
 
-            loss = criterion(logits, targets)
+            loss = criterion(logits_flat, targets)
             
             loss.backward()
+            raw_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+            clipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            print(f"Raw gradient norm: {raw_norm:.4f}, Clipped gradient norm: {clipped_norm:.4f}")                                                                          
+            
+            # Compute gradient norm (global L2) after backward, before optimizer.step() 
+            total_grad_norm = 0.0
+            for param in model.parameters():
+                if param.grad is not None:
+                    param_norm = param.grad.data.norm(2)
+                    total_grad_norm += param_norm.item() ** 2
+            total_grad_norm = total_grad_norm ** 0.5
+            epoch_grad_norms.append(total_grad_norm)
+            
             optimizer.step()
             
             batch_loss = loss.item()
@@ -91,11 +113,13 @@ def train():
             epoch_steps += 1
 
             with torch.no_grad():
-                preds = logits.argmax(dim=-1)
+                preds_flat = logits_flat.argmax(dim=-1)
+                # Use metrics.py function for token accuracy
+                batch_token_acc = compute_token_accuracy(preds_flat, targets, PAD_ID)
+                # Accumulate for epoch average (approximate by counting tokens)
                 non_pad_mask = (targets != PAD_ID)
-                correct = (preds == targets) & non_pad_mask
-                epoch_correct_tokens += correct.sum().item()
                 epoch_total_tokens += non_pad_mask.sum().item()
+                epoch_correct_tokens += int(batch_token_acc * non_pad_mask.sum().item())
             
             if (step + 1) % print_interval == 0:
                 avg_loss = running_loss / max(window_steps, 1)
@@ -107,6 +131,23 @@ def train():
         # ---------- Compute training epoch metrics ----------
         epoch_avg_loss = epoch_loss_sum / max(epoch_steps, 1)
         epoch_token_acc = (epoch_correct_tokens / epoch_total_tokens) if epoch_total_tokens > 0 else 0.0
+        avg_grad_norm = sum(epoch_grad_norms) / max(len(epoch_grad_norms), 1) if epoch_grad_norms else 0.0
+        
+        # GPU memory usage (measured right after training, before validation)
+        # This captures memory during active training, not after cleanup
+        gpu_memory_mb = None
+        gpu_memory_peak_mb = None
+        if torch.cuda.is_available():
+            # Allocated memory at this point (after training loop)
+            gpu_memory_mb = torch.cuda.memory_allocated(DEVICE) / (1024 ** 2)
+            # Peak memory during training (reset was called at start of epoch)
+            gpu_memory_peak_mb = torch.cuda.max_memory_allocated(DEVICE) / (1024 ** 2)
+        
+        # Learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Epoch time
+        epoch_time = time.time() - epoch_start_time
 
         # ---------- Validation loop ----------
         model.eval()
@@ -114,6 +155,8 @@ def train():
         val_steps = 0
         val_correct_tokens = 0
         val_total_tokens = 0
+        val_exact_correct = 0
+        val_total_sequences = 0
 
         with torch.no_grad():
             for batch in val_loader:
@@ -122,21 +165,38 @@ def train():
                 target_tokens = batch['target_tokens'].to(DEVICE)
 
                 logits = model(images, input_tokens)
-                logits = logits.view(-1, vocab_size)
-                targets = target_tokens.view(-1)
+                # Keep original shape for exact match computation
+                batch_size, seq_len = logits.shape[0], logits.shape[1]
+                logits_flat = logits.view(-1, vocab_size)
+                targets_flat = target_tokens.view(-1)
 
-                loss = criterion(logits, targets)
+                loss = criterion(logits_flat, targets_flat)
                 val_loss_sum += loss.item()
                 val_steps += 1
 
-                preds = logits.argmax(dim=-1)
-                non_pad_mask = (targets != PAD_ID)
-                correct = (preds == targets) & non_pad_mask
-                val_correct_tokens += correct.sum().item()
+                # Token accuracy computation using metrics.py
+                preds_flat = logits_flat.argmax(dim=-1)
+                batch_token_acc = compute_token_accuracy(preds_flat, targets_flat, PAD_ID)
+                # Accumulate for validation average
+                non_pad_mask = (targets_flat != PAD_ID)
                 val_total_tokens += non_pad_mask.sum().item()
+                val_correct_tokens += int(batch_token_acc * non_pad_mask.sum().item())
+                
+                # Compute exact match incrementally using metrics.py (O(1) memory per batch)
+                # Reshape predictions back to (batch, seq_len) for sequence-level comparison
+                preds_reshaped = preds_flat.view(batch_size, seq_len)
+                
+                # Use compute_exact_match from metrics.py on this batch only
+                batch_exact_match = compute_exact_match(
+                    preds_reshaped, target_tokens, PAD_ID, sos_id=SOS_ID, eos_id=EOS_ID
+                )
+                # Accumulate counts: batch_exact_match is a fraction, multiply by batch_size to get count
+                val_exact_correct += int(batch_exact_match * batch_size)
+                val_total_sequences += batch_size
 
         val_avg_loss = val_loss_sum / max(val_steps, 1)
         val_token_acc = (val_correct_tokens / val_total_tokens) if val_total_tokens > 0 else 0.0
+        val_exact_match = (val_exact_correct / val_total_sequences) if val_total_sequences > 0 else 0.0
 
         # ---------- Checkpointing ----------
         is_best = val_avg_loss < best_val_loss
@@ -162,10 +222,30 @@ def train():
         # Switch back to training mode for next epoch
         model.train()
 
+        # ---------- Store metrics in dict for future use ----------
+        epoch_metrics = {
+            'epoch': epoch + 1,
+            'learning_rate': current_lr,
+            'epoch_time_seconds': epoch_time,
+            'gradient_norm': avg_grad_norm,
+            'gpu_memory_mb': gpu_memory_mb,
+            'gpu_memory_peak_mb': gpu_memory_peak_mb,
+            'train_loss': epoch_avg_loss,
+            'train_token_accuracy': epoch_token_acc,
+            'val_loss': val_avg_loss,
+            'val_token_accuracy': val_token_acc,
+            'val_exact_match': val_exact_match,
+        }
+
         # ---------- Log epoch summary ----------
         print(f"Epoch {epoch + 1}/{start_epoch + num_epochs} completed.")
+        print(f"  Learning rate: {current_lr:.6f}")
+        print(f"  Epoch time: {epoch_time:.2f}s")
+        print(f"  Gradient norm: {avg_grad_norm:.4f}")
+        if gpu_memory_mb is not None:
+            print(f"  GPU memory: {gpu_memory_mb:.1f} MB (peak: {gpu_memory_peak_mb:.1f} MB)")
         print(f"  Train  - loss: {epoch_avg_loss:.4f}, token accuracy: {epoch_token_acc:.4f}")
-        print(f"  Val    - loss: {val_avg_loss:.4f}, token accuracy: {val_token_acc:.4f}")
+        print(f"  Val    - loss: {val_avg_loss:.4f}, token accuracy: {val_token_acc:.4f}, exact match: {val_exact_match:.4f}")
         if is_best:
             print(f"  Checkpoint: new best model saved to {best_checkpoint_path}")
         print(f"  Checkpoint: last model saved to {last_checkpoint_path}\n")
