@@ -33,8 +33,5 @@ if __name__ == "__main__":
     
     output_logits = model(dummy_images, dummy_input_tokens)
     
-    print(f"Images shape: {dummy_images.shape}")
-    print(f"Input tokens shape: {dummy_input_tokens.shape}")
-    print(f"Output logits shape: {output_logits.shape}")
-    print(f"Expected: (batch, seq_len, vocab_size) = ({batch_size}, {seq_len}, {vocab_size})")
+
 
