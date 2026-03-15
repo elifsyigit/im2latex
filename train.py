@@ -4,12 +4,14 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import sys
 import time
+import csv
+
 
 sys.path.append(str(Path(__file__).parent))
 from config import BATCH_SIZE, LEARNING_RATE, DEVICE, PAD_ID, SOS_ID, EOS_ID
 from data.dataset import Im2LatexDataset
 from models.transformer import Im2LatexModel
-from evaluation.metrics import compute_token_accuracy, compute_exact_match
+from evaluation.metrics import compute_token_accuracy, compute_exact_match, compute_edit_distance
 
 
 def train():
@@ -36,12 +38,19 @@ def train():
         num_workers=0,
         pin_memory=False
     )
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    metrics_path = log_dir / "metrics.csv"
+
+    write_header = not metrics_path.exists() or metrics_path.stat().st_size == 0
+
+
     
     print("Initializing model...")
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(exist_ok=True)
-    last_checkpoint_path = checkpoint_dir / "im2latex_colab.pt"
-    best_checkpoint_path = checkpoint_dir / "im2latex_colab_best.pt"
+    last_checkpoint_path = checkpoint_dir / "im2latex.pt"
+    best_checkpoint_path = checkpoint_dir / "im2latex_best.pt"
 
     model = Im2LatexModel(vocab_size=vocab_size).to(DEVICE)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_ID)
@@ -139,6 +148,8 @@ def train():
         val_total_tokens = 0
         val_exact_correct = 0
         val_total_sequences = 0
+        val_total_edit_distance = 0.0
+        val_total_edit_distance_normalized = 0.0
 
         with torch.no_grad():
             for batch in val_loader:
@@ -168,13 +179,62 @@ def train():
                 val_exact_correct += int(batch_exact_match * batch_size)
                 val_total_sequences += batch_size
 
+                avg_edit_dist, avg_norm_edit_dist = compute_edit_distance(
+                    preds_reshaped, target_tokens, train_dataset.tokenizer, 
+                    PAD_ID, SOS_ID, EOS_ID
+                )
+                val_total_edit_distance += avg_edit_dist * batch_size
+                val_total_edit_distance_normalized += avg_norm_edit_dist * batch_size
+
         val_avg_loss = val_loss_sum / max(val_steps, 1)
         val_token_acc = (val_correct_tokens / val_total_tokens) if val_total_tokens > 0 else 0.0
         val_exact_match = (val_exact_correct / val_total_sequences) if val_total_sequences > 0 else 0.0
+        val_avg_edit_distance = val_total_edit_distance / val_total_sequences if val_total_sequences > 0 else 0.0
+        val_avg_norm_edit_distance = val_total_edit_distance_normalized / val_total_sequences if val_total_sequences > 0 else 0.0
 
         is_best = val_avg_loss < best_val_loss
         if is_best:
             best_val_loss = val_avg_loss
+
+        with open(metrics_path, "a", newline="") as f:
+            writer = csv.writer(f)
+
+            if write_header:
+                writer.writerow([
+                    "epoch",
+                    "train_loss",
+                    "train_token_acc",
+                    "val_loss",
+                    "val_token_acc",
+                    "val_exact_match",
+                    "val_edit_distance",
+                    "val_norm_edit_distance",
+                    "learning_rate",
+                    "grad_norm",
+                    "epoch_time_sec",
+                    "gpu_memory_mb",
+                    "gpu_memory_peak_mb"
+                ])
+                write_header = False
+
+            writer.writerow([
+                epoch + 1,
+                epoch_avg_loss,
+                epoch_token_acc,
+                val_avg_loss,
+                val_token_acc,
+                val_exact_match,
+                val_avg_edit_distance,
+                val_avg_norm_edit_distance,
+                current_lr,
+                avg_grad_norm,
+                epoch_time,
+                gpu_memory_mb,
+                gpu_memory_peak_mb
+            ])
+            f.flush()
+
+
 
         checkpoint_state = {
             "model_state_dict": model.state_dict(),
@@ -200,6 +260,7 @@ def train():
             print(f"  GPU memory: {gpu_memory_mb:.1f} MB (peak: {gpu_memory_peak_mb:.1f} MB)")
         print(f"  Train  - loss: {epoch_avg_loss:.4f}, token accuracy: {epoch_token_acc:.4f}")
         print(f"  Val    - loss: {val_avg_loss:.4f}, token accuracy: {val_token_acc:.4f}, exact match: {val_exact_match:.4f}")
+        print(f"  Val    - edit distance: {val_avg_edit_distance:.4f}, normalized: {val_avg_norm_edit_distance:.4f}")
         if is_best:
             print(f"  Checkpoint: new best model saved to {best_checkpoint_path}")
         print(f"  Checkpoint: last model saved to {last_checkpoint_path}\n")

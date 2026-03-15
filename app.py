@@ -3,7 +3,6 @@ import torch
 from fastapi import FastAPI, File, UploadFile
 from models.transformer import Im2LatexModel            
 from config import MAX_LATEX_LENGTH
-from data.tokenizer import LaTeXTokenizer
 from infer import preprocess_image, greedy_decode
 
 CHECKPOINT_PATH = "checkpoints/im2latex_model.pt"

@@ -51,7 +51,7 @@ def greedy_decode(model, encoder_output, max_length=MAX_LATEX_LENGTH):
     return current_tokens
 
 
-def infer(image_path, checkpoint_path="checkpoints/im2latex_model.pt", ground_truth_latex=None):
+def infer(image_path, checkpoint_path="checkpoints/im2latex_best.pt", ground_truth_latex=None):
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         print(f"Checkpoint not found at {checkpoint_path}")
@@ -94,7 +94,7 @@ def infer(image_path, checkpoint_path="checkpoints/im2latex_model.pt", ground_tr
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Infer LaTeX from a random image")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/im2latex_model.pt",
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/im2latex_best.pt",
                         help="Path to the model checkpoint")
     parser.add_argument("--split", type=str, default="test", choices=["train", "test", "validate"],
                         help="Dataset split to pick random image from")

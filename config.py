@@ -3,7 +3,7 @@ IMAGE_HEIGHT = 224
 IMAGE_WIDTH = 224
 
 # Training configuration
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-4
 
 # Model configuration
